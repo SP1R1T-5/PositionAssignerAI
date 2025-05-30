@@ -1,370 +1,336 @@
-import warnings
-from dataclasses import dataclass, field
-from typing import List, Tuple, Dict, Optional
-
+import ast
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-
-from sklearn.cluster import KMeans
+from dataclasses import dataclass
+from typing import List, Tuple, Dict, Any
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score, classification_report
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import LabelEncoder, StandardScaler
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
 
-warnings.filterwarnings("ignore")
-
+# Mapping for risk tolerance strings to numeric values
+RISK_MAP = {
+    'low': 0.25,
+    'medium': 0.50,
+    'high': 0.75
+}
 
 @dataclass
-class MissionMatchConfig:
-    """Configuration for Mission Match AI."""
-    num_employees: int = 500
-    random_seed: int = 42
+class CandidateProfile:
+    id: str                                      # Setting ID Number for employment candidates
+    age: int                                     # Candidate's age 
+    experience: int                              # Candidate's work experience 
+    job_titles: List[Tuple[str, int]]            # Candidate's work title, years
+    core_skills: List[str]                       # Candidate's core skills
+    certifications: List[str]                    # Candidate's certifications
+    education: Dict[str, Any]                    # Candidate's education history {'degree': str, 'field': str, 'institution': str}
+    languages: List[str]                         # Candidate's known spoken and programming langaugaes known
+    projects: List[Dict[str, Any]]               # Candidate's previous projects {'name': str, 'role': str, 'outcome': str}
+    leadership_years: int                        # Candidate's experience in positions of leadership
+    big_five: Dict[str, float]                   # Candidate's e.g., {'Openness': 0.8, ...}
+    cognitive_style: str                         # Candidate's ideal working style {Logical, Creative, Analytical}
+    conflict_style: str                          # Candidate's conflict resolution style {Avoidant, Competitive, Collaborative}
+    work_pref: str                               # Candidate's work environment preference {Balanced, Flexible, Structured}
+    team_roles: List[str]                        # Candidate's team role tendency {Resource Investigator,Implementer, Completer-Finisher}
+    risk_tolerance: float                        # Candidate's risk tolerance {Low, Medium, High}
+    industry_pref: List[str]                     # Candidate's preferred industry {Education, Retail, Technology}
+    location_pref: str                           # Candidate's preferred working location {On-Site, Hybrid, Remote} 
+    team_size_pref: Tuple[int, int]              # Candidate's ideal team size {Small, Medium, Large}
+    career_goal: str                             # Candidate's career aspiration {Technical, Management, Innovation}
+    performance: float = 0.0                     # Candidate's potential performance based on resume and interviews
+    retention_prob: float = 0.0                  # Candidate's retention probability
+    cluster: int = -1                            # Candidate's cluster group
 
-    # Organization structure
-    departments: List[str] = field(
-        default_factory=lambda: [
-            "Operations",
-            "Technology",
-            "Sales",
-            "Marketing",
-            "Finance",
-            "HR",
-        ]
-    )
-    job_levels: List[str] = field(
-        default_factory=lambda: [
-            "Entry",
-            "Associate",
-            "Senior",
-            "Lead",
-            "Manager",
-        ]
-    )
-
-    # Employee characteristic ranges
-    age_range: Tuple[int, int] = (22, 65)
-    experience_max: int = 35
-    performance_range: Tuple[int, int] = (40, 100)
-    performance_average: float = 75.0
-    performance_std: float = 15.0
-
-    # Skill and training hour ranges
-    technical_skill_range: Tuple[int, int] = (3, 10)
-    leadership_skill_range: Tuple[int, int] = (2, 9)
-    communication_skill_range: Tuple[int, int] = (4, 10)
-    training_hours_range: Tuple[int, int] = (10, 120)
-
-    # Retention calculation
-    base_retention_rate: float = 0.7
-    performance_retention_factor: float = 0.01
-    experience_retention_factor: float = 0.02
-    max_experience_bonus: float = 0.2
-
-    # Filtering criteria
-    leadership_criteria: Dict[str, int] = field(
-        default_factory=lambda: {"min_leadership_skill": 7, "min_performance": 75}
-    )
-    technical_criteria: Dict[str, int] = field(
-        default_factory=lambda: {"min_technical_skill": 8, "min_performance": 70}
-    )
-    senior_criteria: Dict[str, int] = field(
-        default_factory=lambda: {"min_experience": 8, "min_performance": 80}
-    )
-    top_performer_threshold: int = 85
-
-    # Clustering & risk
-    num_clusters: int = 4
-    risk_thresholds: List[float] = field(default_factory=lambda: [0.4, 0.7, 1.0])
-    risk_labels: List[str] = field(
-        default_factory=lambda: ["High Risk", "Medium Risk", "Low Risk"]
-    )
-
-    # Feature selection
-    retention_features: List[str] = field(
-        default_factory=lambda: [
-            "Age", "Experience", "Performance", "Technical_Skill",
-            "Leadership_Skill", "Communication_Skill", "Training_Hours",
-            "Job_Level_Encoded", "Department_Encoded",
-        ]
-    )
-    clustering_features: List[str] = field(
-        default_factory=lambda: [
-            "Age", "Experience", "Performance",
-            "Technical_Skill", "Leadership_Skill", "Communication_Skill",
-        ]
-    )
-
+@dataclass
+class Config:
+    random_seed: int = 42                        # Random seed for reproducibility
+    n_clusters: int = 3                          # Number of clusters for KMeans
 
 class MissionMatchAI:
-    """Core Mission Match AI functionality."""
-    def __init__(self, config: Optional[MissionMatchConfig] = None) -> None:
-        self.config = config or MissionMatchConfig()
-        self.df: Optional[pd.DataFrame] = None
+    def __init__(self, cfg: Config):              # Initialize AI system: seed RNG, prepare storage, scaler, classifier, and clusterer
+        np.random.seed(cfg.random_seed)
+        self.profiles: List[CandidateProfile] = []
         self.scaler = StandardScaler()
-        self.label_encoders: Dict[str, LabelEncoder] = {}
-        self.retention_model: Optional[LogisticRegression] = None
-        self.clusterer: Optional[KMeans] = None
+        self.model = LogisticRegression(max_iter=500)
+        self.clusterer = KMeans(n_clusters=cfg.n_clusters, random_state=cfg.random_seed)
 
-    def load_data(self, path: str) -> pd.DataFrame:
-        """Load CSV or fallback to synthetic data."""
-        try:
-            df = pd.read_csv(path)
-            print(f"Loaded {len(df)} records from '{path}'")
-            self.df = df
-        except Exception as e:
-            print(f"Error loading '{path}': {e}\nGenerating synthetic data.")
-            self.df = self.generate_data()
-        return self.df
+    def load_profiles(self, csv_path: str):       # Load and parse CSV into CandidateProfile instances
+        df = pd.read_csv(csv_path).replace({np.nan: None})
+        print(f"Found columns in CSV: {list(df.columns)}")
 
-    def generate_data(self, n: Optional[int] = None) -> pd.DataFrame:
-        """Generate synthetic employee records."""
-        n = n or self.config.num_employees
-        np.random.seed(self.config.random_seed)
+        column_mapping = { # Setting the columns from dataset to variables
+            'Name': 'id',
+            'Job History': 'job_titles',
+            'Core Skills': 'core_skills',
+            'Certifications': 'certifications',
+            'Education': 'education',
+            'Languages': 'languages',
+            'Project History': 'projects',
+            'Leadership Experience': 'leadership_years',
+            'Cognitive Style': 'cognitive_style',
+            'Conflict Resolution Style': 'conflict_style',
+            'Work Environment Preference': 'work_pref',
+            'Team Role Tendency': 'team_roles',
+            'Risk Tolerance': 'risk_tolerance',
+            'Preferred Industry': 'industry_pref',
+            'Geographic Preference': 'location_pref',
+            'Ideal Team Size': 'team_size_pref',
+            'Career Aspiration': 'career_goal',
+            'Matched Role': 'performance'
+        }
+        df = df.rename(columns=column_mapping)
+        profs = []
 
-        rows = []
-        for i in range(n):
-            age = np.random.randint(*self.config.age_range)
-            exp = min(np.random.randint(0, age - 21), self.config.experience_max)
-            perf = np.clip(
-                np.random.normal(self.config.performance_average, self.config.performance_std),
-                *self.config.performance_range
-            )
-            tech = np.random.randint(*self.config.technical_skill_range)
-            lead = np.random.randint(*self.config.leadership_skill_range)
-            comm = np.random.randint(*self.config.communication_skill_range)
-            train = np.random.randint(*self.config.training_hours_range)
+        for idx, rec in df.iterrows():
+            profile_data = {              # Prefered candidate profile for the position 
+                'id': rec.get('id', f'candidate_{idx}'),
+                'age': 30,
+                'experience': 5,
+                'job_titles': self._parse_list_field(rec.get('job_titles', '')),
+                'core_skills': self._parse_list_field(rec.get('core_skills', '')),
+                'certifications': self._parse_list_field(rec.get('certifications', '')),
+                'languages': self._parse_list_field(rec.get('languages', '')),
+                'projects': self._parse_list_field(rec.get('projects', '')),
+                'team_roles': self._parse_list_field(rec.get('team_roles', '')),
+                'industry_pref': self._parse_list_field(rec.get('industry_pref', '')),
+                'education': self._parse_dict_field(rec.get('education', '')),
+                'big_five': {
+                    'openness': float(rec.get('Openness', 0.5)),
+                    'conscientiousness': float(rec.get('Conscientiousness', 0.5)),
+                    'extraversion': float(rec.get('Extraversion', 0.5)),
+                    'agreeableness': float(rec.get('Agreeableness', 0.5)),
+                    'neuroticism': float(rec.get('Neuroticism', 0.5))
+                },
+                'leadership_years': self._parse_numeric_field(rec.get('leadership_years', '0')),
+            }
+            raw_risk = rec.get('risk_tolerance', None)
+            if isinstance(raw_risk, str):
+                profile_data['risk_tolerance'] = RISK_MAP.get(raw_risk.strip().lower(), 0.5)    # Sets string values to intager, if there isn't then it defaults to .5
+            else:
+                try:
+                    profile_data['risk_tolerance'] = float(raw_risk)    # If numeric then convert it directly
+                except:
+                    profile_data['risk_tolerance'] = 0.5                # If non-numeric then convert to .5
 
-            retention_prob = (
-                self.config.base_retention_rate
-                + (perf - 70) * self.config.performance_retention_factor
-                + min(exp * self.config.experience_retention_factor,
-                      self.config.max_experience_bonus)
-            )
-            retain = int(np.random.random() < retention_prob)
-
-            rows.append({
-                "Employee_ID": f"EMP_{i:04d}",
-                "Age": age,
-                "Experience": exp,
-                "Job_Level": np.random.choice(self.config.job_levels),
-                "Department": np.random.choice(self.config.departments),
-                "Performance": round(perf, 1),
-                "Technical_Skill": tech,
-                "Leadership_Skill": lead,
-                "Communication_Skill": comm,
-                "Training_Hours": train,
-                "Retention": retain,
+            profile_data.update({
+                'cognitive_style': rec.get('cognitive_style', 'Unknown'), # Candidate’s preferred thinking/process style
+                'conflict_style': rec.get('conflict_style', 'Unknown'), # Candidate’s conflict resolution approach
+                'work_pref': rec.get('work_pref', 'Unknown'), # Candidate’s ideal work environment (Structured, Flexible, etc.)
+                'location_pref': rec.get('location_pref', 'Unknown'),  # Candidate’s geographic/remote work preference
+                'career_goal': rec.get('career_goal', 'Unknown'), # Candidate’s stated career aspiration
+                'team_size_pref': self._parse_team_size(rec.get('team_size_pref', '5-10')), # Parse ideal team size range (e.g., “5-10”)
+                'performance': self._calculate_performance(rec), # Compute performance score using skills, certifications, etc.
+                'retention_prob': 0.0,  # Initialize retention probability to zero (to be trained later)
+                'cluster': -1  # Initialize cluster assignment to -1 (unclustered)
             })
 
-        df = pd.DataFrame(rows)
-        print(f"Generated {n} synthetic records")
-        self.df = df
-        return df
+            try:
+                profs.append(CandidateProfile(**profile_data))
+            except Exception as e:
+                print(f"Warning: Could not create profile for record {idx}: {e}")
 
-    def preprocess(self) -> None:
-        """Label-encode categorical columns."""
-        if self.df is None:
-            raise ValueError("No data to preprocess")
+        self.profiles = profs
+        print(f"Successfully loaded {len(self.profiles)} profiles")
 
-        for col in ("Job_Level", "Department"):
-            le = self.label_encoders.get(col, LabelEncoder())
-            self.df[f"{col}_Encoded"] = le.fit_transform(self.df[col])
-            self.label_encoders[col] = le
+    def _parse_list_field(self, field_str):        # Convert CSV field to Python list, handling literal and comma-sep formats
+        if not field_str or pd.isna(field_str):
+            return []
+        if isinstance(field_str, str) and field_str.startswith('[') and field_str.endswith(']'):
+            try:
+                return ast.literal_eval(field_str)
+            except:
+                pass
+        return [item.strip() for item in str(field_str).split(',') if item.strip()]
 
-        print("Preprocessing complete.")
+    def _parse_dict_field(self, field_str):        # Convert CSV field to dict, handling JSON-style strings
+        if not field_str or pd.isna(field_str):
+            return {}
+        if isinstance(field_str, str) and field_str.startswith('{') and field_str.endswith('}'):
+            try:
+                return ast.literal_eval(field_str)
+            except:
+                pass
+        return {'degree': str(field_str)}
 
-    def train_retention(self) -> LogisticRegression:
-        """Train a logistic regression retention model."""
-        if self.df is None:
-            self.generate_data()
+    def _parse_numeric_field(self, field_str):     # Safely parse a string/number field into an integer
+        try:
+            return int(float(str(field_str)))
+        except:
+            return 0
 
-        self.preprocess()
-        feats = [c for c in self.config.retention_features if c in self.df]
-        X = self.df[feats]
-        y = self.df.get("Retention", pd.Series(np.ones(len(X)), dtype=int))
+    def _parse_team_size(self, team_size_str):     # Parse ranges like "5-10" or "5 to 10" into a (min, max) tuple
+        try:
+            s = str(team_size_str)
+            if '-' in s:
+                a, b = s.split('-')
+                return int(a), int(b)
+            if 'to' in s.lower():
+                a, b = s.lower().split('to')
+                return int(a), int(b)
+        except:
+            pass
+        return 1, 10
 
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=0.2, random_state=self.config.random_seed
-        )
+    def _calculate_performance(self, rec):        # Heuristic scoring based on skills, certs, leadership, and languages
+        score = 50.0
+        score += len(self._parse_list_field(rec.get('core_skills', ''))) * 2
+        score += len(self._parse_list_field(rec.get('certifications', ''))) * 5
+        score += self._parse_numeric_field(rec.get('leadership_years', '0')) * 3
+        score += len(self._parse_list_field(rec.get('languages', ''))) * 2
+        return min(score, 100.0)
 
-        model = LogisticRegression(max_iter=1_000, random_state=self.config.random_seed)
-        model.fit(X_train, y_train)
-        self.retention_model = model
+    def train_retention(self):                     # Train logistic regression to predict retention from performance & leadership
+        if not self.profiles:
+            print('No profiles available for training')
+            return
+        df = pd.DataFrame([vars(p) for p in self.profiles])
+        if df.empty:
+            print('Skipping retention (no data)')
+            return
+        X = df[['performance', 'leadership_years']]
+        y = (df['performance'] > 80).astype(int)
+        if y.nunique() < 2:
+            print(f"Skipping retention training: only one class present ({y.unique()[0]})")
+            for p in self.profiles:
+                p.retention_prob = float(y.unique()[0])
+            return
+        self.model.fit(X, y)
+        probs = self.model.predict_proba(X)[:, 1]
+        for p, prob in zip(self.profiles, probs):
+            p.retention_prob = prob
+        print(f"Trained retention model on {len(self.profiles)} profiles")
+        print(f"Average retention probability: {np.mean(probs):.3f}")
 
-        if y.nunique() > 1:
-            y_pred = model.predict(X_test)
-            print(f"Accuracy: {accuracy_score(y_test, y_pred):.3f}")
-            print(classification_report(y_test, y_pred))
+    def cluster(self):                             # Scale features and K-means cluster candidates into cfg.n_clusters groups
+        if not self.profiles:
+            print('Skipping cluster (no profiles)')
+            return
+        df = pd.DataFrame({
+            'skill_count': [len(p.core_skills) for p in self.profiles],
+            'risk_tolerance': [p.risk_tolerance for p in self.profiles],
+            'performance': [p.performance for p in self.profiles],
+            'leadership_years': [p.leadership_years for p in self.profiles]
+        })
+        Xs = self.scaler.fit_transform(df)
+        labels = self.clusterer.fit_predict(Xs)
+        for p, lbl in zip(self.profiles, labels):
+            p.cluster = int(lbl)
+        print(f"Clustered {len(self.profiles)} profiles into {len(set(labels))} clusters")
+        for cid, count in pd.Series(labels).value_counts().sort_index().items():
+            print(f"  Cluster {cid}: {count} candidates")
 
-        return model
+    def analyze_clusters(self):                    # Print summary statistics for each candidate cluster
+        if not self.profiles or all(p.cluster == -1 for p in self.profiles):
+            print('No clustering data available')
+            return
+        print("\nCLUSTER ANALYSIS")
+        for cid in sorted(set(p.cluster for p in self.profiles)):
+            grp = [p for p in self.profiles if p.cluster == cid]
+            print(f"\nCluster {cid} ({len(grp)} candidates):")
+            print(f"  Avg Performance: {np.mean([p.performance for p in grp]):.1f}")
+            print(f"  Avg Leadership: {np.mean([p.leadership_years for p in grp]):.1f}")
+            print(f"  Avg Risk Tolerance: {np.mean([p.risk_tolerance for p in grp]):.2f}")
+            print("  Members:", ", ".join(p.id for p in grp))
 
-    def cluster(self, k: Optional[int] = None) -> pd.DataFrame:
-        """Cluster employees into k groups."""
-        if self.df is None:
-            raise ValueError("No data to cluster")
+    def generate_report(self):                     # Output overall counts, performance range, and call cluster analysis
+        if not self.profiles:
+            print('No profiles available')
+            return
+        print("\nREPORT")
+        print(f"Total Candidates: {len(self.profiles)}")
+        perf = [p.performance for p in self.profiles]
+        print(f"Performance Range: {min(perf):.1f} - {max(perf):.1f}")
+        self.analyze_clusters()
 
-        k = k or self.config.num_clusters
-        feats = [c for c in self.config.clustering_features if c in self.df]
-        X = self.scaler.fit_transform(self.df[feats])
-
-        km = KMeans(n_clusters=k, random_state=self.config.random_seed)
-        self.df["Cluster"] = km.fit_predict(X)
-        self.clusterer = km
-
-        summary = (
-            self.df
-            .groupby("Cluster")[feats + (["Retention"] if "Retention" in self.df else [])]
-            .mean()
-            .round(2)
-        )
-        print(f"Cluster summary (k={k}):\n{summary}")
-        return self.df
-
-    def find_top(self, role: str = "leadership") -> pd.DataFrame:
-        """Return the top 10 candidates for a given role."""
-        if self.df is None:
-            raise ValueError("No data available")
-
-        criteria = {
-            "leadership": self.config.leadership_criteria,
-            "technical": self.config.technical_criteria,
-            "senior": self.config.senior_criteria,
-        }.get(role, {})
-
-        df = self.df
-        for key, val in criteria.items():
-            df = df[df[key.replace("min_", "").title()] >= val]
-
-        return df.nlargest(10, "Performance")[[
-            "Employee_ID", "Job_Level", "Department", "Performance",
-            "Technical_Skill", "Leadership_Skill"
-        ]]
-
-    def predict_risk(self) -> pd.DataFrame:
-        """Predict retention risk for each employee."""
-        if not self.retention_model:
-            raise RuntimeError("Train the retention model first")
-
-        feats = [c for c in self.config.retention_features if c in self.df]
-        probs = self.retention_model.predict_proba(self.df[feats])[:, 1]
-
-        result = self.df[[
-            col for col in ["Employee_ID", "Job_Level", "Department", "Performance"]
-            if col in self.df
-        ]].copy()
-        result["Retention_Probability"] = probs
-        result["Risk_Level"] = pd.cut(
-            probs,
-            bins=[0] + self.config.risk_thresholds,
-            labels=self.config.risk_labels
-        )
-        return result.sort_values("Retention_Probability")
-
-    def visualize(self) -> None:
-        """Plot retention and performance insights."""
-        if self.df is None:
-            raise ValueError("No data to visualize")
-
-        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-
-        # Retention by Department
-        if {"Department", "Retention"}.issubset(self.df):
-            self.df.groupby("Department")["Retention"].mean().plot(
-                kind="bar", ax=axes[0, 0]
-            )
-            axes[0, 0].set_title("Retention Rate by Department")
-            axes[0, 0].tick_params(axis="x", rotation=45)
-
-        # Performance distribution
-        axs = axes[0, 1]
-        if "Performance" in self.df:
-            self.df["Performance"].hist(ax=axs, bins=20, alpha=0.7)
-            axs.set_title("Performance Distribution")
-
-        # Experience vs Performance
-        ax = axes[1, 0]
-        ax.scatter(
-            self.df["Experience"], self.df["Performance"],
-            c=self.df.get("Retention", self.df["Age"]), alpha=0.6
-        )
-        ax.set_xlabel("Experience (years)")
-        ax.set_ylabel("Performance")
-        ax.set_title("Experience vs. Performance")
-
-        # Skills by Job Level
-        if "Job_Level" in self.df:
-            skills = ["Technical_Skill", "Leadership_Skill"]
-            valid = [s for s in skills if s in self.df]
-            self.df.groupby("Job_Level")[valid].mean().plot(
-                kind="bar", ax=axes[1, 1]
-            )
-            axes[1, 1].set_title("Average Skills by Job Level")
-            axes[1, 1].tick_params(axis="x", rotation=45)
-
-        plt.tight_layout()
+    def plot_analytics(self):                      # Display matplotlib charts: cluster sizes, distributions, and scatter/boxplots
+        # Number of candidates per cluster
+        cluster_counts = pd.Series([p.cluster for p in self.profiles]).value_counts().sort_index()
+        plt.figure()
+        plt.bar([f'Cluster {cid}' for cid in cluster_counts.index], cluster_counts.values)
+        plt.title('Number of Candidates per Cluster')
+        plt.xlabel('Cluster')
+        plt.ylabel('Number of Candidates')
         plt.show()
 
-    def report(self) -> str:
-        """Generate a text summary report."""
-        if self.df is None:
-            return "No data available."
+        # Performance distribution
+        perf = [p.performance for p in self.profiles]
+        plt.figure()
+        plt.hist(perf, bins=10)
+        plt.title('Performance Distribution')
+        plt.xlabel('Performance Score')
+        plt.ylabel('Number of Candidates')
+        plt.show()
 
-        lines = [
-            "=== MISSION MATCH AI REPORT ===",
-            f"Total Employees: {len(self.df)}",
+        # Retention probability distribution
+        probs = [p.retention_prob for p in self.profiles]
+        plt.figure()
+        plt.hist(probs, bins=10)
+        plt.title('Retention Probability Distribution')
+        plt.xlabel('Retention Probability')
+        plt.ylabel('Number of Candidates')
+        plt.show()
+
+        # Cluster scatter (Risk vs Performance)
+        df_plot = pd.DataFrame({
+            'risk_tolerance': [p.risk_tolerance for p in self.profiles],
+            'performance':     [p.performance    for p in self.profiles],
+            'cluster':         [p.cluster        for p in self.profiles]
+        })
+        plt.figure()
+        for cid in sorted(df_plot['cluster'].unique()):
+            subset = df_plot[df_plot['cluster'] == cid]
+            plt.scatter(subset['risk_tolerance'], subset['performance'], label=f'Cluster {cid}')
+        plt.title('Clusters: Risk vs Performance')
+        plt.xlabel('Risk Tolerance')
+        plt.ylabel('Performance')
+        plt.legend()
+        plt.show()
+
+        # Boxplot of Performance by Cluster
+        plt.figure()
+        data_perf = [
+            df_plot[df_plot['cluster'] == cid]['performance'].values
+            for cid in sorted(df_plot['cluster'].unique())
         ]
+        plt.boxplot(data_perf, labels=[f'Cluster {cid}' for cid in sorted(df_plot['cluster'].unique())])
+        plt.title('Performance by Cluster')
+        plt.xlabel('Cluster')
+        plt.ylabel('Performance Score')
+        plt.show()
 
-        if "Retention" in self.df:
-            lines.append(f"Overall Retention: {self.df['Retention'].mean():.2%}")
-        if "Performance" in self.df:
-            avg_perf = self.df["Performance"].mean()
-            lines.append(f"Avg. Performance: {avg_perf:.1f}")
-            top = self.df.nlargest(5, "Performance")
-            lines.append("Top 5 Performers:")
-            lines += [f"  {row.Employee_ID}: {row.Performance:.1f}"
-                      for _, row in top.iterrows()]
-
-        if {"Department", "Retention"}.issubset(self.df):
-            best = self.df.groupby("Department")["Retention"].mean().idxmax()
-            rate = self.df.groupby("Department")["Retention"].mean().max()
-            lines.append(f"Best Dept. by Retention: {best} ({rate:.1%})")
-
-        return "\n".join(lines)
-
-
-def main():
-    ai = MissionMatchAI()
-    ai.generate_data()
-    ai.train_retention()
-    ai.cluster()
-
-    # Top-5 for each chart
-    risk_df = ai.predict_risk()
-    top_retention = risk_df.nlargest(5, "Retention_Probability")
-    print("\nTop 5 by Retention Probability:")
-    print(top_retention[["Employee_ID", "Retention_Probability", "Risk_Level"]])
-
-    top_performers = ai.df.nlargest(5, "Performance")[["Employee_ID", "Performance"]]
-    print("\nTop 5 Performers:")
-    print(top_performers)
-
-    top_experience = ai.df.nlargest(5, "Experience")[["Employee_ID", "Experience"]]
-    print("\nTop 5 by Experience:")
-    print(top_experience)
-
-    ai.df["Total_Skill"] = ai.df["Technical_Skill"] + ai.df["Leadership_Skill"]
-    top_skilled = ai.df.nlargest(5, "Total_Skill")[
-        ["Employee_ID", "Technical_Skill", "Leadership_Skill", "Total_Skill"]
-    ]
-    print("\nTop 5 by Combined Skill:")
-    print(top_skilled)
-
-    print("\n=== GENERATING VISUALIZATIONS ===")
-    ai.visualize()
-
-    print("\n" + ai.report())
+        # Boxplot of Risk Tolerance by Cluster
+        plt.figure()
+        data_risk = [
+            df_plot[df_plot['cluster'] == cid]['risk_tolerance'].values
+            for cid in sorted(df_plot['cluster'].unique())
+        ]
+        plt.boxplot(data_risk, labels=[f'Cluster {cid}' for cid in sorted(df_plot['cluster'].unique())])
+        plt.title('Risk Tolerance by Cluster')
+        plt.xlabel('Cluster')
+        plt.ylabel('Risk Tolerance')
+        plt.show()
 
 
 if __name__ == "__main__":
-    main()
+    print("Initializing MissionMatchAI...")       # Entry point: initialize and run analysis pipeline
+    config = Config()
+    ai_system = MissionMatchAI(config)
+
+    print("Loading profiles...")                  # Step 1: load candidate data
+    ai_system.load_profiles("MissionMatchDS1.csv")
+
+    print("\nTraining retention model...")        # Step 2: train retention predictor
+    ai_system.train_retention()
+
+    print("\nClustering candidates...")           # Step 3: cluster profiles
+    ai_system.cluster()
+
+    print("\nGenerating report...")               # Step 4: summarize clusters and performance
+    ai_system.generate_report()
+
+    print("\nDisplaying graphical analytics...")  # Step 5: visualize results
+    ai_system.plot_analytics()
+
+    print("\nAnalysis complete!")                 # Finish execution
+
+#Real Jon Fortnite
